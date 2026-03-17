@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PIXEL DUEL</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a0a2e;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Press Start 2P', monospace;
+    overflow: hidden;
+  }
+  h1 {
+    color: #ff9f43;
+    font-size: 20px;
+    letter-spacing: 4px;
+    margin-bottom: 12px;
+    text-shadow: 3px 3px 0 #c0392b, 6px 6px 0 #1a0a2e;
+  }
+  #game-canvas {
+    border: 6px solid #c984c9;
+    box-shadow: 0 0 0 3px #7b3fa0, 0 0 40px rgba(201,132,201,0.4);
+    image-rendering: pixelated;
+    cursor: none;
+  }
+  #hud {
+    display: flex;
+    justify-content: space-between;
+    width: 640px;
+    margin-top: 10px;
+    color: #ff9f43;
+    font-size: 10px;
+  }
+  #instructions {
+    color: #c984c9;
+    font-size: 8px;
+    margin-top: 8px;
+    text-align: center;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+<h1>☆ PIXEL DUEL ☆</h1>
+<canvas id="game-canvas" width="640" height="380"></canvas>
+<div id="hud">
+  <span id="player-score">PLAYER: 0</span>
+  <span id="round-label">ROUND 1</span>
+  <span id="enemy-score">CPU: 0</span>
+</div>
+<div id="instructions">SPACEBAR TO DRAW — DODGE TUMBLEWEEDS</div>
+
+<script>
+const canvas = document.getElementById('game-canvas');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+// ─── PALETTE ───────────────────────────────────────────────
+const C = {
+  sky:    '#3535c0',
+  border: '#c984c9',
+  player: '#d4820a',
+  enemy:  '#d4603a',
+  cactus: '#c984c9',
+  bullet: '#ffe066',
+  tumbleweed: '#c8a060',
+  blood:  '#ff2244',
+  flash:  '#fffbe0',
+  shadow: '#1a1280',
+  ground: '#3535c0',
+  text:   '#ffe066',
+  dark:   '#1a0a2e',
+  green:  '#44ff88',
+  red:    '#ff4444',
+};
+
+// ─── PIXEL ART SPRITES (8x8 grids scaled up) ───────────────
+// Each sprite = array of rows, each row = string of chars
+// '1'=main color, '2'=accent, '.'=transparent
+const SPRITES = {
+  cowboy_idle: [
+    '..111..',
+    '.11111.',
+    '.1.1.1.',
+    '.11111.',
+    '..111..',
+    '.1.1.1.',
+    '..1.1..',
+    '..1.1..',
+  ],
+  cowboy_draw: [
+    '..111..',
+    '.11111.',
+    '.1.1.1.',
+    '.11122.',
+    '..111..',
+    '.1.1.1.',
+    '..1.1..',
+    '..1.1..',
+  ],
+  cowboy_dead: [
+    '.......',
+    '..111..',
+    '.11111.',
+    '..111..',
+    '.11111.',
+    '1111111',
+    '.......',
+    '.......',
+  ],
+  cactus: [
+    '..111..',
+    '..111..',
+    '1.111.1',
+    '1111111',
+    '..111..',
+    '..111..',
+    '..111..',
+    '..111..',
+  ],
+};
+
+function drawSprite(sprite, x, y, scale, color, color2, flipX = false) {
+  const rows = SPRITES[sprite];
+  const pw = scale, ph = scale;
+  for (let r = 0; r < rows.length; r++) {
+    for (let c = 0; c < rows[r].length; c++) {
+      const ch = rows[r][flipX ? rows[r].length - 1 - c : c];
+      if (ch === '.') continue;
+      ctx.fillStyle = ch === '2' ? (color2 || color) : color;
+      ctx.fillRect(x + c * pw, y + r * ph, pw, ph);
+    }
+  }
+}
+
+// ─── GAME STATE ─────────────────────────────────────────────
+const S = 7; // pixel scale
+let state = 'intro'; // intro | countdown | duel | result | gameover
+let playerScore = 0, enemyScore = 0, round = 1;
+let countdown = 3;
+let countdownTimer = 0;
+let drawWindow = 0; // random window in ms for enemy to draw
+let resultTimer = 0;
+let resultText = '';
+let resultColor = C.green;
+let playerState = 'idle'; // idle | drawing | dead
+let enemyState  = 'idle';
+let playerBullet = null;
+let enemyBullet  = null;
+let particles = [];
+let tumbleweeds = [];
+let tumbleweedHitTimer = 0;
+let introAlpha = 1;
+let flashTimer = 0;
+
+// Tumbleweed
+function spawnTumbleweed() {
+  tumbleweeds.push({
+    x: -40,
+    y: 180 + Math.random() * 100,
+    vx: 2.5 + Math.random() * 2,
+    r: 0,
+    size: 14 + Math.random() * 10,
+  });
+}
+
+function resetRound() {
+  playerState = 'idle';
+  enemyState  = 'idle';
+  playerBullet = null;
+  enemyBullet  = null;
+  particles = [];
+  flashTimer = 0;
+  tumbleweeds = [];
+  countdown = 3;
+  countdownTimer = 0;
+  drawWindow = 1200 + Math.random() * 1800; // enemy draws 1.2–3s after GO
+  state = 'countdown';
+  // schedule tumbleweed
+  setTimeout(spawnTumbleweed, 400 + Math.random() * 800);
+  setTimeout(spawnTumbleweed, 1200 + Math.random() * 600);
+}
+
+// ─── INPUT ──────────────────────────────────────────────────
+let spacePressed = false;
+let spaceHandled = false;
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (!spaceHandled) {
+      spaceHandled = true;
+      handleSpace();
+    }
+  }
+});
+document.addEventListener('keyup', e => {
+  if (e.code === 'Space') spaceHandled = false;
+});
+
+function handleSpace() {
+  if (state === 'intro') { resetRound(); return; }
+  if (state === 'result') { nextRound(); return; }
+  if (state === 'gameover') { resetGame(); return; }
+  if (state === 'countdown') {
+    // Too early! penalty
+    playerState = 'dead';
+    enemyState  = 'draw';
+    finishRound('CHEATER! YOU LOSE!', C.red);
+    return;
+  }
+  if (state === 'duel') {
+    if (playerState === 'idle') {
+      playerState = 'drawing';
+      fireBullet('player');
+    }
+  }
+}
+
+function fireBullet(who) {
+  if (who === 'player') {
+    playerBullet = { x: 130 + S * 4, y: 100 + S * 3.5, vx: 9, active: true };
+    flashTimer = 6;
+  } else {
+    enemyBullet = { x: 510 - S * 4, y: 100 + S * 3.5, vx: -9, active: true };
+    flashTimer = 6;
+  }
+}
+
+function spawnParticles(x, y, color) {
+  for (let i = 0; i < 18; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 2 + Math.random() * 4;
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      life: 30 + Math.random() * 20,
+      maxLife: 50,
+      color,
+      size: 3 + Math.random() * 4,
+    });
+  }
+}
+
+function finishRound(text, color) {
+  resultText = text;
+  resultColor = color;
+  state = 'result';
+  resultTimer = 0;
+}
+
+function nextRound() {
+  round++;
+  if (playerScore >= 3) { state = 'gameover'; resultText = 'YOU WIN!'; resultColor = C.green; return; }
+  if (enemyScore >= 3) { state = 'gameover'; resultText = 'YOU LOSE!'; resultColor = C.red; return; }
+  resetRound();
+}
+
+function resetGame() {
+  playerScore = 0; enemyScore = 0; round = 1;
+  document.getElementById('player-score').textContent = 'PLAYER: 0';
+  document.getElementById('enemy-score').textContent = 'CPU: 0';
+  document.getElementById('round-label').textContent = 'ROUND 1';
+  resetRound();
+}
+
+// ─── DRAW FUNCTIONS ─────────────────────────────────────────
+function drawBackground() {
+  // Sky
+  ctx.fillStyle = C.sky;
+  ctx.fillRect(0, 0, 640, 380);
+  // Pixel ground line
+  ctx.fillStyle = C.shadow;
+  ctx.fillRect(0, 300, 640, 2);
+  // Stars (static)
+  ctx.fillStyle = '#7070ff';
+  for (let s of [[50,40],[200,25],[350,55],[480,30],[580,45],[120,70],[420,20]]) {
+    ctx.fillRect(s[0], s[1], 2, 2);
+  }
+}
+
+function drawCactus() {
+  // Center cactus
+  drawSprite('cactus', 290, 210, S - 1, C.cactus);
+}
+
+function drawTumbleweeds() {
+  for (const t of tumbleweeds) {
+    ctx.save();
+    ctx.translate(t.x, t.y);
+    ctx.rotate(t.r);
+    // Pixel tumbleweed: rough circle of pixels
+    const pts = [[-1,0],[0,-1],[1,0],[0,1],[-1,-1],[1,-1],[1,1],[-1,1]];
+    for (const [px,py] of pts) {
+      ctx.fillStyle = C.tumbleweed;
+      ctx.fillRect(px * t.size * 0.4, py * t.size * 0.4, t.size * 0.35, t.size * 0.35);
+    }
+    ctx.fillStyle = '#a07838';
+    ctx.fillRect(-t.size * 0.1, -t.size * 0.1, t.size * 0.2, t.size * 0.2);
+    ctx.restore();
+  }
+}
+
+function drawPlayer() {
+  const x = 60, y = 90;
+  const sprite = playerState === 'dead' ? 'cowboy_dead' : playerState === 'drawing' ? 'cowboy_draw' : 'cowboy_idle';
+  drawSprite(sprite, x, y, S, C.player, C.yellow);
+}
+
+function drawEnemy() {
+  const x = 460, y = 90;
+  const sprite = enemyState === 'dead' ? 'cowboy_dead' : enemyState === 'drawing' ? 'cowboy_draw' : 'cowboy_idle';
+  drawSprite(sprite, x, y, S, C.enemy, '#ff9f43', true);
+}
+
+function drawBullets() {
+  if (playerBullet && playerBullet.active) {
+    ctx.fillStyle = C.bullet;
+    ctx.fillRect(playerBullet.x - 5, playerBullet.y - 3, 10, 6);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(playerBullet.x - 2, playerBullet.y - 1, 4, 2);
+  }
+  if (enemyBullet && enemyBullet.active) {
+    ctx.fillStyle = C.bullet;
+    ctx.fillRect(enemyBullet.x - 5, enemyBullet.y - 3, 10, 6);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(enemyBullet.x - 2, enemyBullet.y - 1, 4, 2);
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size/2, p.y - p.size/2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUDOverlay() {
+  if (state === 'intro') {
+    ctx.globalAlpha = introAlpha;
+    ctx.fillStyle = 'rgba(20,10,40,0.7)';
+    ctx.fillRect(0, 0, 640, 380);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = C.text;
+    ctx.font = '16px "Press Start 2P"';
+    ctx.textAlign = 'center';
+    ctx.fillText('PIXEL DUEL', 320, 130);
+    ctx.font = '9px "Press Start 2P"';
+    ctx.fillStyle = C.cactus;
+    ctx.fillText('FIRST TO 3 KILLS WINS', 320, 170);
+    ctx.fillStyle = '#aaa';
+    ctx.fillText('DRAW TOO EARLY = LOSE THE ROUND', 320, 200);
+    ctx.fillStyle = C.tumbleweed;
+    ctx.fillText('DODGE TUMBLEWEEDS!', 320, 220);
+    ctx.fillStyle = C.green;
+    ctx.font = '11px "Press Start 2P"';
+    const blink = Math.floor(Date.now() / 500) % 2;
+    if (blink) ctx.fillText('PRESS SPACE TO START', 320, 280);
+    ctx.textAlign = 'left';
+  }
+
+  if (state === 'countdown') {
+    ctx.fillStyle = 'rgba(20,10,40,0.35)';
+    ctx.fillRect(180, 140, 280, 80);
+    ctx.fillStyle = C.text;
+    ctx.font = '13px "Press Start 2P"';
+    ctx.textAlign = 'center';
+    const label = countdown > 0 ? `READY... ${countdown}` : '🔫 DRAW! 🔫';
+    ctx.fillStyle = countdown === 0 ? '#ff4444' : C.text;
+    ctx.fillText(label, 320, 190);
+    ctx.textAlign = 'left';
+  }
+
+  if (state === 'result') {
+    ctx.fillStyle = 'rgba(20,10,40,0.55)';
+    ctx.fillRect(120, 130, 400, 110);
+    ctx.font = '15px "Press Start 2P"';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = resultColor;
+    ctx.fillText(resultText, 320, 180);
+    ctx.font = '8px "Press Start 2P"';
+    ctx.fillStyle = '#ccc';
+    const blink = Math.floor(Date.now() / 500) % 2;
+    if (blink) ctx.fillText('PRESS SPACE TO CONTINUE', 320, 215);
+    ctx.textAlign = 'left';
+  }
+
+  if (state === 'gameover') {
+    ctx.fillStyle = 'rgba(20,10,40,0.75)';
+    ctx.fillRect(0, 0, 640, 380);
+    ctx.font = '22px "Press Start 2P"';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = resultColor;
+    ctx.fillText(resultText, 320, 160);
+    ctx.font = '10px "Press Start 2P"';
+    ctx.fillStyle = '#aaa';
+    ctx.fillText(`PLAYER ${playerScore} — CPU ${enemyScore}`, 320, 200);
+    ctx.font = '8px "Press Start 2P"';
+    ctx.fillStyle = C.green;
+    const blink = Math.floor(Date.now() / 500) % 2;
+    if (blink) ctx.fillText('PRESS SPACE TO PLAY AGAIN', 320, 250);
+    ctx.textAlign = 'left';
+  }
+
+  // Screen flash on gunshot
+  if (flashTimer > 0) {
+    ctx.globalAlpha = flashTimer / 10 * 0.4;
+    ctx.fillStyle = C.flash;
+    ctx.fillRect(0, 0, 640, 380);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ─── UPDATE ─────────────────────────────────────────────────
+let lastTime = 0;
+let enemyDrawTimer = 0;
+let tumbleweedSpawnTimer = 0;
+
+function update(now) {
+  const dt = now - lastTime;
+  lastTime = now;
+
+  // Countdown
+  if (state === 'countdown') {
+    countdownTimer += dt;
+    const stage = Math.floor(countdownTimer / 1000);
+    countdown = Math.max(0, 3 - stage);
+    if (countdownTimer >= 3000) {
+      state = 'duel';
+      enemyDrawTimer = 0;
+    }
+  }
+
+  // Duel
+  if (state === 'duel') {
+    enemyDrawTimer += dt;
+    // Enemy draws after random window
+    if (enemyState === 'idle' && enemyDrawTimer >= drawWindow) {
+      enemyState = 'drawing';
+      fireBullet('enemy');
+    }
+  }
+
+  // Bullets
+  if (playerBullet && playerBullet.active) {
+    playerBullet.x += playerBullet.vx;
+    // Hit enemy?
+    if (playerBullet.x >= 460 && playerBullet.x <= 515 && enemyState !== 'dead') {
+      playerBullet.active = false;
+      enemyState = 'dead';
+      spawnParticles(490, 130, C.blood);
+      if (enemyBullet && enemyBullet.active) enemyBullet.active = false;
+      playerScore++;
+      document.getElementById('player-score').textContent = `PLAYER: ${playerScore}`;
+      document.getElementById('round-label').textContent = `ROUND ${round}`;
+      finishRound('YOU WIN!', C.green);
+    }
+    if (playerBullet.x > 640) playerBullet.active = false;
+  }
+
+  if (enemyBullet && enemyBullet.active) {
+    enemyBullet.x += enemyBullet.vx;
+    // Hit player?
+    if (enemyBullet.x <= 130 && enemyBullet.x >= 60 && playerState !== 'dead') {
+      enemyBullet.active = false;
+      playerState = 'dead';
+      spawnParticles(100, 130, C.blood);
+      if (playerBullet && playerBullet.active) playerBullet.active = false;
+      enemyScore++;
+      document.getElementById('enemy-score').textContent = `CPU: ${enemyScore}`;
+      document.getElementById('round-label').textContent = `ROUND ${round}`;
+      finishRound('YOU LOSE!', C.red);
+    }
+    if (enemyBullet.x < 0) enemyBullet.active = false;
+  }
+
+  // Particles
+  for (const p of particles) {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.15;
+    p.life -= 1;
+  }
+  particles = particles.filter(p => p.life > 0);
+
+  // Tumbleweeds
+  tumbleweedSpawnTimer += dt;
+  if (tumbleweedSpawnTimer > 3500 && (state === 'countdown' || state === 'duel')) {
+    tumbleweedSpawnTimer = 0;
+    if (Math.random() < 0.6) spawnTumbleweed();
+  }
+
+  for (const t of tumbleweeds) {
+    t.x += t.vx;
+    t.r += 0.08;
+  }
+  tumbleweeds = tumbleweeds.filter(t => t.x < 700);
+
+  // Tumbleweed hits player bullet
+  if (playerBullet && playerBullet.active) {
+    for (const t of tumbleweeds) {
+      if (Math.abs(playerBullet.x - t.x) < t.size && Math.abs(playerBullet.y - t.y) < t.size) {
+        playerBullet.active = false;
+        spawnParticles(t.x, t.y, C.tumbleweed);
+        t.x = 800; // remove
+        break;
+      }
+    }
+  }
+
+  // Tumbleweed hits player!
+  for (const t of tumbleweeds) {
+    if (state === 'duel' || state === 'countdown') {
+      // Player region: x 60-120, y 90-150
+      if (t.x > 60 && t.x < 130 && t.y > 90 && t.y < 180 && playerState !== 'dead') {
+        playerState = 'dead';
+        spawnParticles(90, 130, C.blood);
+        enemyScore++;
+        document.getElementById('enemy-score').textContent = `CPU: ${enemyScore}`;
+        finishRound('FLATTENED!', C.red);
+        t.x = 800;
+      }
+    }
+  }
+
+  if (flashTimer > 0) flashTimer--;
+  if (tumbleweedHitTimer > 0) tumbleweedHitTimer--;
+}
+
+// ─── RENDER ─────────────────────────────────────────────────
+function render() {
+  drawBackground();
+  drawCactus();
+  drawTumbleweeds();
+  drawPlayer();
+  drawEnemy();
+  drawBullets();
+  drawParticles();
+  drawHUDOverlay();
+}
+
+// ─── LOOP ───────────────────────────────────────────────────
+function loop(now) {
+  update(now);
+  render();
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
